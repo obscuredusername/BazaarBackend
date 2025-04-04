@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import os
@@ -41,6 +42,15 @@ def save_uploaded_file(file: UploadFile) -> str:
     file_path = os.path.join(upload_subdir, filename)
 
     return file_path
+
+# Add direct file serving endpoint that keeps the original path format
+@router.get("/uploads/{date_dir}/{filename}")
+async def serve_image(date_dir: str, filename: str):
+    """Serve image files directly from the uploads directory"""
+    file_path = os.path.join(UPLOAD_DIR, date_dir, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(file_path)
 
 @router.get("/all_users", response_model=List[UserResponse])
 async def get_users(db: Session = Depends(get_db)):
@@ -217,6 +227,33 @@ async def get_products(
     """Get all products with pagination"""
     try:
         products = db.query(Product).offset(offset).limit(limit).all()
+
+        # Process products to fix the image paths for frontend
+        for product in products:
+            if hasattr(product, 'images') and product.images:
+                # Process PostgreSQL array format
+                if isinstance(product.images, str):
+                    images_str = product.images.strip('{}')
+                    image_paths = [path.strip() for path in images_str.split(',') if path.strip()]
+                else:
+                    image_paths = product.images
+
+                # Make paths appropriate for frontend (convert local paths to API URLs)
+                api_paths = []
+                for path in image_paths:
+                    if path:
+                        # Extract just the part after the UPLOAD_DIR
+                        if path.startswith(UPLOAD_DIR + "/"):
+                            path = path[len(UPLOAD_DIR):]
+                        # Ensure path starts with "/"
+                        if not path.startswith("/"):
+                            path = "/" + path  # Ensure only a single leading "/"
+                        # Add the full base URL to the image path
+                        api_paths.append(f"http://127.0.0.1:8000{path}")
+
+                # Update the images attribute
+                product.images = api_paths
+        
         logger.info(f"Retrieved {len(products)} products")
         return products
     except Exception as e:
@@ -245,43 +282,56 @@ async def get_product(product_id: int, db: Session = Depends(get_db)):
                 detail="User not found"
             )
 
-        # Safely process images
+        # Process images to make them accessible via API
         try:
             if isinstance(product.images, str):
                 # Remove PostgreSQL array format characters and split
                 images_str = product.images.strip('{}')
-                images_list = images_str.split(',') if images_str else []
+                image_paths = [path.strip() for path in images_str.split(',') if path.strip()]
             else:
-                images_list = product.images if product.images else []
+                image_paths = product.images if product.images else []
+            
+            # Convert paths to API-accessible URLs
+            api_paths = []
+            for path in image_paths:
+                if path:
+                    # Extract just the part after the UPLOAD_DIR
+                    if path.startswith(UPLOAD_DIR + "/"):
+                        path = path[len(UPLOAD_DIR):]
+                    # Ensure path starts with "/"
+                    if not path.startswith("/"):
+                        path = "/" + path  # Ensure only a single leading "/"
+                    # Add the full base URL to the image path
+                    api_paths.append(f"http://127.0.0.1:8000{path}")
+            
         except Exception as img_error:
             logger.error(f"Error processing images for product {product_id}: {str(img_error)}")
-            images_list = []
+            api_paths = []
 
         return {
-    "id": product.id,
-    "title": product.title,
-    "description": product.description,
-    "price": product.price,
-    "category": product.category,
-    "type": product.type,
-    "city": product.city,
-    "location": product.location,
-    "return_policy": product.return_policy,
-    "size": product.size,
-    "images": images_list,
-    "user": {
-        "id": user.id,
-        "username": user.username,
-        "contact_no": user.contact_no,
-        "rating": user.rating,
-        "email": user.email,
-
-        "joining_date": (
-            user.joining_date.strftime("%Y-%m-%d") 
-            if isinstance(user.joining_date, datetime) else None
-        )
-    }
-}
+            "id": product.id,
+            "title": product.title,
+            "description": product.description,
+            "price": product.price,
+            "category": product.category,
+            "type": product.type,
+            "city": product.city,
+            "location": product.location,
+            "return_policy": product.return_policy,
+            "size": product.size,
+            "images": api_paths,  # API-accessible image paths
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "contact_no": user.contact_no,
+                "rating": user.rating,
+                "email": user.email,
+                "joining_date": (
+                    user.joining_date.strftime("%Y-%m-%d") 
+                    if isinstance(user.joining_date, datetime) else None
+                )
+            }
+        }
 
     except HTTPException:
         raise
@@ -291,7 +341,8 @@ async def get_product(product_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error retrieving product"
         )
-    
+
+     
 @router.post("/signup", response_model=UserResponse)
 async def signup(signup: UserCreate, db: Session = Depends(get_db)):
     """User sign-up with improved error handling"""

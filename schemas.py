@@ -37,6 +37,7 @@ class ProductResponse(BaseModel):
     images: List[str]  # List of image URLs
     category: str
     price: float
+    type: str
 
     class Config:
         orm_mode = True
